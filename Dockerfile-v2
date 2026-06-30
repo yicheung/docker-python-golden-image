@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# check=error=true
+
+# ────────────────────────────────────────────────────────────────────────
+# STAGE 1: Dependency Compiler (Builder)
+# ────────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim@sha256:b27df5841f3355e9473f9a516d38a6783b6c8dfeacaf2d14a240f443b368ddb6 AS builder
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip==24.3.1
+
+RUN --mount=type=bind,source=requirements.txt,target=requirements.txt \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -r requirements.txt
+
+
+# ────────────────────────────────────────────────────────────────────────
+# STAGE 2: Secure Production Runtime
+# ────────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim@sha256:b27df5841f3355e9473f9a516d38a6783b6c8dfeacaf2d14a240f443b368ddb6 AS runtime
+
+LABEL org.opencontainers.image.title="flask-app" \
+      org.opencontainers.image.description="Flask application runtime image" \
+      org.opencontainers.image.source="https://github.com/yicheung/docker-python-golden-image" \
+      org.opencontainers.image.version="1.0.0"
+
+WORKDIR /app
+
+RUN groupadd -g 10001 appgroup && \
+    useradd -u 10001 -g appgroup --no-log-init -m -s /sbin/nologin appuser
+
+COPY --link --from=builder --chown=10001:10001 /opt/venv /opt/venv
+COPY --link --chown=10001:10001 src/ /app/src/
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')" || exit 1
+
+ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", "--chdir", "src", "app:app"]
+CMD []
